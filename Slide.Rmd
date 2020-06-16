@@ -1,0 +1,474 @@
+---
+title: "Untitled"
+author: "Sri Seshadri"
+date: "3/19/2020"
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+  ioslides_presentation: default
+---
+
+<style>
+.forceBreak { -webkit-column-break-after: always; break-after: column; }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = F, message = F)
+library(fpp3)
+# install.packages("fabletools",repos = "https://tidyverts.org")
+library(magrittr)
+library(purrr)
+library(plotly)
+load('Reporting.RData')
+source('~/Documents/USSalesForecast/getArimaForecasts.R')
+```
+
+## Objective
+
+1. Forecast next 5 years of US Sales.
+2. Quantify the likelihood of sales surpassing 1.8 trillion.
+3. Assess if forecasting sales by region would help the overall sales forecast.
+
+## Data
+
+```{r}
+Description <- data.frame(
+  Variables = c("YearMonth", "RecessionYears", "RecessionCorrection","Sales", "Sales_in_trillions"),
+  Description = c(paste(min(Sales$YearMonth),"to", max(Sales$YearMonth)),
+                  "1, during the years 2001,2008 and 2009; 0 otherwise",
+                  "1, during the years 2001,2008,2009 and 2015-16;0 otherwise",
+                  "Sales in millions (USD)",
+                  "Sales in trillions (USD)"
+                  ))
+  
+knitr::kable(Description) %>%
+  kableExtra::kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+## Total Business Sales in the US
+
+```{r, warning=F}
+
+Sales %>% 
+  mutate(Event = as.factor(ifelse(RecessionYears == 1,"Recession", 
+                                  ifelse(RecessionCorrection == 1,"Correction","Growth")))) %>% 
+  as.data.frame()-> pdf
+
+
+plot_ly(data = pdf, 
+        x =  ~YearMonth, 
+        y = ~Sales_in_trillions,
+        mode = 'lines', 
+        type = "scatter", 
+        color = ~I('gray'),
+        text = ~Event,
+        hovertemplate = paste('<i>Sales</i>: %{y:.2f}',
+                              '<br><b>YearMonth</b>: %{x}<br>',
+                              '<b>%{text}</b>')) %>% 
+  add_trace(x = ~YearMonth, 
+            y = ~Sales_in_trillions,
+            mode = "markers",
+            group = ~factor(Event),
+            showlegend = F,
+             marker = list(
+              color = factor(pdf$Event, labels = c("orange","black","red")),
+              symbol = 'circle-open',
+              hovertemplate = " ",
+              size = 4),
+            name=""
+  ) %>% 
+  layout(xaxis = list(title = "",
+                      linecolor = "black",
+                      linewidth = 0.5,
+                      mirror = T), 
+         yaxis = list(title ="Sales in trillions USD",
+                      linecolor = "black",
+                      linewidth = 0.5,
+                      mirror = T),
+         title = "Total Sales in the US")
+      
+
+
+```
+
+
+## Seasonality
+
+```{r}
+s1
+```
+
+## Modeling issue 1: What should be the training and validation data? 
+
+\fontsize{9}{10}\sf
+
+```{r}
+
+rects <-  tibble(start = yearmonth(c("2010 Jan","2015 Jan")),
+                 end = yearmonth(c("2014 Dec", "2019 Dec"))) %>% 
+  mutate(group = seq_along(start))
+  
+Sales %>% 
+  ggplot(aes(x=YearMonth, y = Sales_in_trillions)) + 
+  geom_line(col = "grey") + geom_point(aes(col = ifelse(RecessionYears == 1, 'red',ifelse(RecessionCorrection == 1,'chocolate1','black'))),shape = 1,size = 0.8) + 
+  scale_color_identity() +
+  labs(title = "Total Business Sales in US",  caption = "Green zone - training data \n
+       Red zone - validation data") +
+  ylab("Sales in trillions of dollars") + xlab("") + scale_x_date(date_breaks = "3 years",date_labels = "%Y") + 
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        legend.position = "none", 
+        plot.caption  = element_text(face = "bold"), 
+        plot.title = element_text(hjust = 0.5)) +
+  geom_rect(data = rects, inherit.aes = F, aes(xmin = start, xmax = end, ymin = 0.47, ymax = 1.6),fill = c("green", "red"), alpha = 0.3)
+```
+
+Models trained with 2010-14 data would not learn the recession effect.
+
+
+## Demonstrate Issue 1
+
+```{r}
+benchmark$forecasts %>% 
+  filter(.model %in% c('ets','hw_a','arima')) %>% 
+  #autoplot(Sales %>% filter(year(YearMonth) > 2014), level = NULL) +  geom_line(col = "black") +
+  autoplot(Sales,level = NULL) +  geom_line(col = "gray", alpha = 0.9) +
+  labs(title = "Benchmark model forecasts", y = "Sales in trillions",subtitle = "arima - ARIMA(0,1,1)(0,1,0)[12]; ets - ETS(A,Ad,A); hw_a -  ETS(A,A,A)",x = "") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10), plot.subtitle = element_text(hjust = 0.5,size = 8),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8))
+```
+
+## Demonstrate Issue 1 (contd)
+
+What if the training data was to include 2015 data and the trained models be validated against 2016-19 data?
+
+```{r}
+benchmark2$forecasts %>% 
+  filter(.model %in% c('ets','hw_a','arima')) %>% 
+  #autoplot(Sales %>% filter(year(YearMonth) > 2014), level = NULL) +  geom_line(col = "black") +
+  autoplot(Sales, level = NULL) +  geom_line(col = "gray", alpha = 0.9) +
+  labs(title = "Benchmark model forecasts", y = "Sales in trillions",subtitle = "arima - ARIMA(2,1,2)(0,1,0)[12]; ets - ETS(A,N,A); hw_a -  ETS(A,A,A)",x="") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10), plot.subtitle = element_text(hjust = 0.5,size = 8),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8))
+```
+
+## Modeling issue 2
+
+Even if the models learnt the behavior at recession periods ... 
+
+**How do we know future recession years in the forecast horizon?**
+
+## Solution options to modeling issue 1
+
+1. Leverage pre great recession data and its similarity to post great recession data.
+2. Asuume 2015 was a recession year and train models and test on 2016-2019.
+
+Use Recession/Correction years as indicatior variables in each of the soluton strategy.
+Ignore great-recession data for model training.
+
+```{r, warning=F}
+gridExtra::grid.arrange(SlopeInspection,agrExperimentPlot, ncol = 2, top = "Sales during periods before and after great recession")
+```
+
+## Leverage pre-great recession data
+
+Models trained with data from 1999-2003 when applied to 2015 data without retraining sufferes level/intercept mis-specification. The mis-specification is handled by adding the difference of sales in Dec 2003 and Dec 2014 to the forecast.
+
+```{r}
+
+rects2 <-  tibble(start = yearmonth(c("1999 Jan","2015 Jan")),
+                 end = yearmonth(c("2003 Dec", "2019 Dec"))) %>% 
+  mutate(group = seq_along(start))
+  
+
+mdls <- getModelsTrained(1999,2003,2004,2008)
+
+mdls$ModelStack %>% 
+  select(LMArima) %>% 
+  forecast(h = "5 years", new_data = Sales %>% filter(year(YearMonth) > 2014)) %>% 
+  mutate(Sales_in_trillions = Sales_in_trillions) %>% 
+  autoplot(Sales, level = NULL) + geom_line(col = "grey") + geom_point(aes(col = ifelse(RecessionYears == 1, 'red',ifelse(RecessionCorrection == 1,'chocolate1','black'))),shape = 1,size = 0.8) + 
+  scale_color_identity() +
+  labs(title = "Total Business Sales in US",  caption = "Green zone - training data \n
+       Red zone - validation data", subtitle = "Linear model /w ARIMA errors and RecessionYears as predictor") +
+  ylab("Sales in trillions of dollars") + xlab("") + scale_x_date(date_breaks = "3 years",date_labels = "%Y") + 
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        legend.position = "none", 
+        plot.caption  = element_text(face = "bold"), 
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_rect(data = rects2, inherit.aes = F, aes(xmin = start, xmax = end, ymin = 0.47, ymax = 1.6),fill = c("green", "red"), alpha = 0.2)
+```
+
+## Leverage pre-great recession data
+
+Models trained with data from 1999-2003 when applied to 2015 data without retraining sufferes level/intercept mis-specification. The mis-specification is handled by adding the difference of sales in Dec 2003 and Dec 2014 to the forecast.
+
+```{r}
+
+
+mdls$ModelStack %>% 
+  select(LMArima) %>% 
+  forecast(h = "5 years", new_data = Sales %>% filter(year(YearMonth) > 2014)) %>% 
+  mutate(Sales_in_trillions = Sales_in_trillions + 0.469) %>% 
+  autoplot(Sales, level = NULL)  + geom_line(col = "grey")+ geom_point(aes(col = ifelse(RecessionYears == 1, 'red',ifelse(RecessionCorrection == 1,'chocolate1','black'))),shape = 1,size = 0.8) + 
+  scale_color_identity() +
+  labs(title = "Total Business Sales in US",  caption = "Green zone - training data \n
+       Red zone - validation data",subtitle = "Linear model /w ARIMA errors and RecessionYears as predictor") +
+  ylab("Sales in trillions of dollars") + xlab("") + scale_x_date(date_breaks = "3 years",date_labels = "%Y") + 
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        legend.position = "none", 
+        plot.caption  = element_text(face = "bold"), 
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_rect(data = rects2, inherit.aes = F, aes(xmin = start, xmax = end, ymin = 0.47, ymax = 1.6),fill = c("green", "red"), alpha = 0.2)
+```
+
+
+## Composite model {.smaller}
+
++ **L**evel adjusted **E**TS with **ARIMA**  = **LEARIMA** ??
++  An ETS model with dampening trend (trained on 1992-2001 data) to be used when a recession year is forecasted and ARIMA model on growth years. 
++  Here 2016 is forecasted to be recession year and 2015,2017-19 are deemed growth years. 
++  The composite model forecasts 2015 with ARIMA, 2016 with level adjusted ETS models and 2016 with ARIMA model.
+
+
+
+```{r}
+Forecast_2015_2019  <-  twoStepForecast(data = Sales,driftmodel = recessionslope,currentyear = 2014,RecessionYears = c(2016)) 
+
+rects3 <-  tibble(start = yearmonth(c("1992 Jan","2010 Jan")),
+end = yearmonth(c("2001 Dec", "2014 Dec"))) %>%
+mutate(group = seq_along(start))
+
+Forecast_2015_2019$forecast %>% 
+  mutate(.model = ifelse(year(YearMonth)==2016,"ets",ifelse(year(YearMonth) < 2016,"arima", "arima2"))) %>% 
+  as_fable(response = Sales_in_trillions, distribution = .distribution) %>%  
+  autoplot(Sales, level = NULL) + theme_bw() + geom_line(col = "gray") + 
+  geom_rect(data = rects3, inherit.aes = F, aes(xmin = start, xmax = end, ymin = 0.47, ymax = 1.7),fill = c("green", "olivedrab3"), alpha = 0.2) +
+  labs(title = "Total Business Sales in US",  caption = "Green zone - ETS training data \n
+       Olive Zone - ARIMA training data", subtitle = "2016 assumed to be recession year, others as growth") +
+  ylab("Sales in trillions of dollars") + xlab("") + scale_x_date(date_breaks = "3 years",date_labels = "%Y") + 
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        #legend.position = "none", 
+        plot.caption  = element_text(face = "bold"), 
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+
+
+## Models trained on pre-great recession data
+
+```{r}
+# Learn effect of recession from 2001 recession and apply the effect on 2016.
+
+# mdls$ModelStack %>% select(LMArima) %>% report()
+# mdls$ModelStack %>% select(tslm) %>% report()
+
+#mdls$ModelStack %>% select(tslm)  %>% gg_tsresiduals()
+
+# getArimaForecasts is a misnomer, can be used for any model
+
+getArimaForecasts(mdls$ModelStack %>% select(LMArima),
+                  Sales,
+                  newdata = Sales %>% filter(year(YearMonth) > 2014),
+                  currentYear = 2014) -> LMArimafcts_2019
+
+getArimaForecasts(mdls$ModelStack %>% select(tslm),
+                  Sales,
+                  newdata = Sales %>% filter(year(YearMonth) > 2014),
+                  currentYear = 2014) -> tslm_2019
+
+
+last5knownyears  <-  twoStepForecast(data = Sales,driftmodel = recessionslope,currentyear = 2014,RecessionYears = c(2016)) 
+
+LMArimafcts_2019 %>% 
+ rbind(tslm_2019) %>% 
+  rbind(last5knownyears$forecast %>% 
+          mutate(.model = "composite") %>% 
+          as_fable(response = Sales_in_trillions,distribution = .distribution)) %>% 
+  autoplot(Sales,level = NULL) +  theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8)) + geom_line(col = "gray") + 
+  scale_x_date(date_breaks = "3 years",date_labels = "%Y") +
+  labs(title = "Forecasts based on models trained on pre- great recession data", x ="", y = "Sales in trillions")
+
+```
+
+
+
+ˆ
+
+
+## Accuracy metrics
+
+```{r}
+
+LMArimafcts_2019 %>% 
+  rbind(tslm_2019) %>%
+  rbind(last5knownyears$forecast %>% 
+          mutate(.model = "composite") %>% 
+          as_fable(response = Sales_in_trillions,distribution = .distribution)) %>% 
+  accuracy(Sales) %>% 
+  arrange(MAPE) %>% 
+   knitr::kable(digits = 3) %>% 
+  kableExtra::kable_styling(full_width = T) %>% 
+  kableExtra::row_spec(2,color = "red",bold = T)
+
+```
+
+## Assuming 2015 as recession year...
+
+```{r}
+#2. Pretend 2015 was a recession year and train models and test on 2016-2019.
+TOTBUSSMNSA <- read.csv("TOTBUSSMNSA.csv")
+
+#------------------------
+# Convert to tsibble
+#------------------------
+TOTBUSSMNSA %>% 
+  mutate(DATE = ymd(DATE)) %>% 
+  mutate(YearMonth = yearmonth(DATE),
+         Sales = TOTBUSSMNSA) %>% 
+  select(-TOTBUSSMNSA,-DATE) %>% 
+  as_tsibble(index = YearMonth) ->Sales
+
+#--------------------------------------------------------
+# Add additional indicator variables
+#   1. Election Years  
+#   2. Recession Years  
+#   3. Sales in Trillions (to be used as response)
+#----------------------------------------------------------
+
+Sales %<>% 
+  mutate(
+        #ElectionYear = ifelse(year(YearMonth) %in% seq(from = 1992,to = 2019, by =4),1,0),
+         RecessionYears = as.factor(ifelse(year(YearMonth) %in% c(2001,2008,2009),1,0)),
+         RecessionCorrection = as.factor(ifelse(year(YearMonth) %in% c(2001,2008,2009,2014,2015,2016),1,0)),
+         Sales_in_trillions = Sales* 1000000/1000000000000)
+
+
+mdls2 <- getModelsTrained(2010,2015,2016,2019)
+
+last5knownyears2  <-  twoStepForecast(data = Sales,driftmodel = recessionslope,currentyear = 2015,RecessionYears = c(2016)) 
+
+mdls2$forecasts %>% 
+  filter(.model %in% c("LMArima","tslm")) %>% 
+  rbind(last5knownyears2$forecast %>% 
+          mutate(.model = "composite") %>% 
+          filter(year(YearMonth) < 2020) %>% 
+          as_fable(response = Sales_in_trillions,distribution = .distribution))%>% 
+  autoplot(Sales, level = NULL) + theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8)) + geom_line(col = "gray") + 
+  scale_x_date(date_breaks = "3 years",date_labels = "%Y") +
+  labs(title = "Forecasts based on models trained on post-great recession data", x ="", y = "Sales in trillions") + geom_line(col = "gray")
+
+
+
+```
+
+## Accuracy metrics
+
+```{r}
+mdls2$forecasts %>% 
+  filter(.model %in% c("LMArima","tslm")) %>% 
+  rbind(last5knownyears2$forecast %>% mutate(.model = "composite") %>% as_fable(response = Sales_in_trillions,distribution = .distribution)) %>% 
+  accuracy(Sales) %>% 
+  arrange(MAPE) %>% 
+  knitr::kable(digits = 3) %>% 
+  kableExtra::kable_styling(full_width = T) %>% 
+  kableExtra::row_spec(1,color = "red",bold = T)
+
+
+```
+
+## Solution to issue 2: How do we forecast future recession
+
+GDP output gap is the difference between GDP output and potential. Positive output gap indicates overheated market.
+
+**Educated guess that thre consecutive years of overheated market results in a recession the following year**
+
+```{r}
+OutputGDPGap %>% 
+  mutate(Date = yearmonth(Date)) %>% 
+  filter(year(Date) < 2019) %>% 
+  mutate(RecessionYears = factor(ifelse(year(Date) %in% c(2001,2008,2009),"Recession","Non-Recession"),levels = c("Recession","Non-Recession"))) %>% 
+  as_tsibble(index = Date) %>% 
+  ggplot(aes(x=Date, y = Value)) + geom_point(aes(col = RecessionYears))+
+  geom_line() + 
+  labs(title = "GDP Output gap") +
+  ylab("GDP output gap") + xlab("") + scale_x_date(date_breaks = "5 years",date_labels = "%Y") +
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "lightgray"),
+        #legend.position = "none", 
+        plot.caption  = element_text(colour = "#87CEFF"), 
+        plot.title = element_text(hjust = 0.5)) + geom_hline(yintercept = 0, col = "blue")
+```
+
+
+## Point forecasts for 2020-2024
+
+**Assumes 2020 is a recssion year**
+
+```{r}
+futureyears_2020 <- twoStepForecast(Sales,recessionslope,2019,2020)
+
+futureyears_2020$Plot   + scale_x_date(date_breaks = "5 years",date_labels = "%Y") +
+  labs(title = "Point forecast for US sales in trillions for the next 5 years using Composite of ETS and ARIMA models",
+                    y = "Sales in trillions",
+                    x = "") +  geom_line(col = "grey") +
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "lightgray"),
+        #legend.position = "none", 
+        plot.caption  = element_text(colour = "#87CEFF"), 
+        plot.title = element_text(hjust = 0.5, size = 10))
+```
+
+## Likelihood for sales to surpass 1.8 trillion at least once
+
+1. Simulate 5 year forecasts based on bootstrapped validation errors.
+2. Simulate 5 year forecasts by modeling shocked time series data of sales.
+
+Above methods simulate all possible recession scenarios (assuming utmost 1 year of recession is possible)
+
+## Simulation based on bootstrapped test errors
+
+```{r}
+generatedfcts %>% 
+  autoplot(Sales, level = NULL ) +  geom_line(col = "grey") + theme(legend.position = "none",
+                                         panel.background = element_rect(fill = "white",color = "black"),
+                                         panel.grid = element_line(colour = "lightgray"),
+                                         plot.caption  = element_text(colour = "#87CEFF"), 
+                                         plot.title = element_text(hjust = 0.5, size = 10)) + labs(title = "600 simulations of bootstrapped test errors", y = "Sales in trillions", x = "") + geom_hline(yintercept = 1.8, col = "red", lty = 2)
+```
+**The chance of sales surpassing 1.8 trillion US dollars is  `r paste0(round(Over1.8$Chance,4)* 100,"%")`**
+
+## Simulation based on shocked time series data of sales
+
+```{r}
+stackedfcts %>% 
+  autoplot(Sales, level = NULL)+  geom_line(col = "grey") +theme(legend.position = "none",
+                                         panel.background = element_rect(fill = "white",color = "black"),
+                                         panel.grid = element_line(colour = "lightgray"),
+                                         plot.caption  = element_text(colour = "#87CEFF"), 
+                                         plot.title = element_text(hjust = 0.5, size = 10)) + labs(title = "50 simulations - modeling and forecasting shocked time series", y = "Sales in trillions", x = "") + geom_hline(yintercept = 1.8, col = "red", lty = 2)
+```
+
+**The chance of sales surpassing 1.8 trillion US dollars is `r paste0(round(Over1.8_2$Chance,4)*100,"%")`** 
+
+

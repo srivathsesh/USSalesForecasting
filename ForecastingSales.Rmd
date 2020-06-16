@@ -1,0 +1,802 @@
+---
+title: "US Business Sale forecast"
+author: "Sri Seshadri"
+date: "3/14/2020"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    theme: cerulean
+  pdf_document:
+    toc: yes
+---
+
+<style type="text/css">
+
+body{ /* Normal  */
+      font-size: 12px;
+  }
+td {  /* Table  */
+  font-size: 8px;
+}
+h1.title {
+  font-size: 38px;
+  color: DarkRed;
+}
+h1 { /* Header 1 */
+  font-size: 28px;
+  color: DarkBlue;
+}
+h2 { /* Header 2 */
+    font-size: 22px;
+  color: DarkBlue;
+}
+h3 { /* Header 3 */
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+}
+
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F,message = F)
+library(kfigr)
+```
+
+```{r librarycalls}
+library(fpp3)
+# install.packages("fabletools",repos = "https://tidyverts.org")
+library(magrittr)
+library(purrr)
+library(plotly)
+source('twoStepForecast.R')
+source('getModelsTrained.R')
+source('simulatePaths.R')
+```
+
+\newpage
+
+
+# Abstract
+
+This paper discusses various modeling approaches used to forecast monthly US business sales for the next five years and provide a probability estimate for sales surpassing 1.8 trillion dollars in the next five years. The US business Sales has an increasing trend and monthly seasonality. The trend is affected during recessions (2001,2008-09) and special events like market corrections (2016). The benchmark models (Seasonal Naive,STL,ETS & ARIMA) that did not have "recession year" as external regressor did not have the ability to dampen the forecast during recession year and increase the forecast trend when the recession was over. When last year of the training data was a recession year, the models underestimated the sales for the entire forecast horizon, at times even predicting a negative trend. Additional models such as Fourier models suffered a similar issue. Models that included "recession years" as regressor, like TSLM, Linear model with ARIMA errors did not learn the slump of the recession well enough. A composite model, which is a combination of ETS with dampening trend and ARIMA model; and uses "recession years" as predictor variable was trained. Though this model was not the top performer from RMSE/MAPE metric, it was able to swing the forecasts down for a predicted recession year and swing the forecast back up when the recession year elapsed. Hence the composite model was chosen for making the final forecasts. The prediction, if any of the years in the forecast horizon would be a recession year is made using the GDP output gap.
+
+The likelihood of sales surpassing 1.8 trillion dollars at least once in the next 5 years were computed by simulating several forecast paths for the next 5 years using bootstrapped errors. Additional approach of simulating shocked time series data, similar to the original data and refitting models was taken. Forecasts of next 5 year sales for each of the simulated time series data was obtained to compute the likelihood. Simulations included scenarios of recessions in the forecast horizon.The likelihood of sales to surpass 1.8 trillion is between 40% to 44% based on these two methods. Finally, arguments "for" and "against" using the total of individual region's sales forecast to forecast total US sales are discussed.
+
+
+
+
+
+
+
+# Exploratory data analysis
+
+## Data
+US business data was obtained from the web link - https://fred.stlouisfed.org/series/TOTBUSSMNSA as of 14th March 2020.  The raw data was transformed to show sales in trillions and additional attribute of recession years were added to the data. Additional attribute variable to show the recent market correction in 2016 along with recession years was added to the data. The dictionary of the data is shown in table 1.
+
+```{r ETL}
+
+#-------------------------------------------
+#      Read Data 
+#-------------------------------------------
+TOTBUSSMNSA <- read.csv("TOTBUSSMNSA.csv")
+
+#------------------------
+# Convert to tsibble
+#------------------------
+TOTBUSSMNSA %>% 
+  mutate(DATE = ymd(DATE)) %>% 
+  mutate(YearMonth = yearmonth(DATE),
+         Sales = TOTBUSSMNSA) %>% 
+  select(-TOTBUSSMNSA,-DATE) %>% 
+  as_tsibble(index = YearMonth) ->Sales
+
+#--------------------------------------------------------
+# Add additional indicator variables
+#   1. Election Years  
+#   2. Recession Years  
+#   3. Sales in Trillions (to be used as response)
+#----------------------------------------------------------
+
+Sales %<>% 
+  mutate(
+        #ElectionYear = ifelse(year(YearMonth) %in% seq(from = 1992,to = 2019, by =4),1,0),
+         RecessionYears = as.factor(ifelse(year(YearMonth) %in% c(2001,2008,2009),1,0)),
+         RecessionCorrection = as.factor(ifelse(year(YearMonth) %in% c(2001,2008,2009,2014,2016),1,0)),
+         Sales_in_trillions = Sales* 1000000/1000000000000)
+
+
+Description <- data.frame(
+  Variables = c("YearMonth", "RecessionYears", "RecessionCorrection","Sales", "Sales_in_trillions"),
+  Description = c(paste(min(Sales$YearMonth),"to", max(Sales$YearMonth)),
+                  "1, during the years 2001,2008 and 2009; 0 otherwise",
+                  "1, during the years 2001,2008,2009 and 2015 &/ 2016; 0 otherwise",
+                  "Sales in millions (USD)",
+                  "Sales in trillions (USD)"
+                  ))
+knitr::kable(Description,caption = "data dictionary")
+
+```
+
+## Insights from exploratory data analysis.
+`r figr('TimeSeries', TRUE, type="Figure")` shows the time series plot of the data and `r figr('Seasonality', TRUE, type="Figure")` shows the seasonality and year over year increase in sales by month. The following observation are made from the plots. 
+
++ There is a 12 month periodicity / seasonality in the data and overall increasing trend.
++ December months have the highest sales, with January and February being the lowest.
++ The variation in the data, increases with trend. 
++ The 2001 recession had a dampening effect on sales and 2008-09 great recession resulted in significant decrease in sales.
++ 2015-16 had a slump in sales, 2016 was termed as a market correction.
++ The behavior of time series is almost identical in regions before the great recession (1998 - 2005) and after the great recession (2012-2019).
+  + This is further explored in the next section. 
+
+
+
+```{r TimeSeries, fig.cap="US Sales in trillions of dollars"}
+
+
+Sales %>% 
+  ggplot(aes(x=YearMonth, y = Sales_in_trillions)) + 
+  geom_line(col = "grey") + geom_point(aes(col = ifelse(RecessionYears == 1, 'red',ifelse(RecessionCorrection == 1,'chocolate1','black'))),shape = 1,size = 0.8) + 
+  scale_color_identity() +
+  labs(title = "Total Business Sales in US",  caption = "Red markers - US recession years \n
+       Orange markers- 2016 market correction") +
+  ylab("Sales in trillions of dollars") + xlab("") + scale_x_date(date_breaks = "3 years",date_labels = "%Y") + 
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        legend.position = "none", 
+        plot.caption  = element_text(colour = "red",face = "bold"), 
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r seasonality, fig.cap="Seasonality in sales"}
+Sales %>% 
+  gg_season(Sales_in_trillions) + theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 6),
+                                        axis.title.y = element_text(size = 8)) + 
+  labs(title = "Seasonality in US Sales", x = "", y = "Sales in trillions") -> s1
+
+Sales %>% 
+  gg_subseries(Sales_in_trillions) + theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 6),
+                                        axis.title.y = element_text(size = 8)) + 
+  labs(title = "Sales increase year over year", x = "", y = "Sales in trillions") -> s2
+
+gridExtra::grid.arrange(s1,s2,nrow = 2)
+```
+
+### History repeating itself...
+
+`r figr('BeforeAfterGreatRecession', TRUE, type="Figure")` shows time series during periods before (between 1999-2005) and after the great recession (between 2013-2019) next to each other. Within each of those time periods are recessions / market corrections. It can be seen that there is a dampening and drift during the recession/correction. The sales then picks up with a positive slope. The slopes appear to be similar, if not identical. This becomes more clear when year 2015 is removed from the post great recession period. 2015 market was tumultuous with Chinese yuan devaluation.  
+
+The insight of similarity in behavior across time periods is critical for modeling purposes. The drift in the sales can be modeled and applied when a recession is forecasted. More details on this modeling strategy is covered in the next section.
+
+```{r BeforeAfterGreatRecession, fig.cap="Similar behavior before and after great recession ",fig.height=6,fig.width=8}
+Sales %>%
+  filter(year(YearMonth) > 1997 , year(YearMonth) < 2005) %>% 
+  select(YearMonth,Sales_in_trillions,RecessionCorrection) %>% 
+  as_tibble() %>% 
+  #rename(SalesBeforeGreatRecession = Sales_in_trillions) %>% 
+  mutate(index = row_number(),
+         period = "1999-2005") %>% 
+  select(-YearMonth)-> bgr
+
+Sales %>% 
+  filter(year(YearMonth) > 2012 , year(YearMonth) < 2020) %>% 
+  select(YearMonth,Sales_in_trillions,RecessionCorrection) %>% 
+  as_tibble() %>% 
+  #rename(SalesAfterGreatRecession = Sales_in_trillions) %>% 
+  mutate(index = row_number(),
+         period = "2013-2019" ) %>% 
+  select(-YearMonth) -> agr
+
+Sales %>% 
+  filter(year(YearMonth) > 2011 , year(YearMonth) < 2020) %>% 
+  filter(!year(YearMonth) == 2015) %>% 
+  select(YearMonth,Sales_in_trillions,RecessionCorrection) %>% 
+  as_tibble() %>% 
+  #rename(SalesAfterGreatRecession = Sales_in_trillions) %>% 
+  mutate(index = row_number(),
+         period = "2012-2014/2016-2019" ) %>% 
+  select(-YearMonth) -> agrExperiment
+
+bgr %>% 
+  rbind(agrExperiment) %>% 
+  mutate(Event = factor(ifelse(RecessionCorrection==0,"non-recession","recession/correction"))) %>% 
+  ggplot(aes(x=index, y = Sales_in_trillions, group = period))  + 
+  geom_line(aes(col = period)) + 
+  geom_point(aes(col = period, shape = Event)) + 
+  geom_smooth(se = F) + 
+  theme(legend.text = element_text(size = 6),
+                              legend.title = element_text(size = 7),
+                              panel.background = element_rect(fill = "white",color = "black"),
+                              panel.grid = element_line(colour = "gray92"),
+        plot.subtitle = element_text(size = 8),
+        axis.title.x = element_text(size = 6)) +
+  labs(title = "",
+       subtitle = "removed 2015; added 2012 for exploration purposes",
+       y = "") -> agrExperimentPlot
+
+bgr %>% 
+  rbind(agr) %>% 
+  mutate(Event = factor(ifelse(RecessionCorrection==0,"non-recession","recession/correction"))) %>% 
+  ggplot(aes(x=index, y = Sales_in_trillions, group = period))  + 
+  geom_line(aes(col = period)) + 
+  geom_point(aes(col = period, shape = Event)) + 
+  geom_smooth(se = F) + theme(legend.text = element_text(size = 6),
+                              legend.title = element_text(size = 7),
+                              panel.background = element_rect(fill = "white",color = "black"),
+                              panel.grid = element_line(colour = "gray92"),
+                              axis.title.x = element_text(size = 6)) +
+  labs(title = "",
+       y = "Sales in trillions") -> SlopeInspection
+
+gridExtra::grid.arrange(SlopeInspection,agrExperimentPlot, ncol = 2, top = "Sales during periods before and after great recession")
+  
+
+```
+
+# Modeling strategy
+
+The following factors were considered to come up with an effective modeling strategy. The premise of the strategy is that, the great recession is a rare event and the data at the time would not be representative of the near future.
+
+## Decision on training and validation window
+
+It is assumed that at least 2 years of data is required to reasonably train a forecasting model to forecast the next 5 year period. If we were to train a model using post great recession era data, we could set our training data to begin at 2010 Jan and end at 2011 Dec. And use the next 5 years data as a validation set. But the issue here is the next five years would end at 2016 which is a special event year (market correction). Our model would not have had the opportunity to learn the effect of recessions. 
+
+One approach could be to use the pre-great recession era data to learn the effect/drift due to recession and potentially apply that learning to the special event in 2016. BUT, how would we know of an impending special event in 2016, when we are at 2012? How would we know, if there would be a recession/correction in the future? On the other hand, if a rolling window of 2 years is used, the model may potentially learn a drift during the special event years and use it to project the next five years without knowing how to turn on a positive slope (increasing trend) after the special event. 
+
+## Strategy for model training
+
+With the above concerns mentioned, the following plan was adopted:
+
+1. Use 2010 - 2014 to train benchmark models and validate it on 2015 through 2019 data.
+2. Use 1992 - 2004 data to train a model to learn the drift during special event years and positive trend after the special event, using recession /correction as a regressor.
+  +   Use external data to predict potential special event in the future and apply the prediction as regressor into the above model.
+  +   Validate using 2015-19 data.
+
+
+# Modeling
+
+## Benchmark models
+
+The following models are trained on 2010-2014 as benchmark models and their performance validated using 2015 through 2019:
+
+1. Seasonal Naive
+2. Seasonal and Trend decomposition using Loess (STL)
+3. Holts Winter model (Additive)
+4. Exponential trend smoothing (ETS)
+5. ARIMA
+
+To stabilize the variation in data over time, the sales values are log transformed for improving modeling performance. `r figr('logtrans', TRUE, type="Figure")` shows the log transformed sales, that has been variance stabilized.
+
+```{r logtrans, fig.cap = "log transformation of sales"}
+Sales %>% 
+  ggplot(aes(x=YearMonth, y = log(Sales_in_trillions))) + 
+  geom_line(col = "grey") + geom_point(aes(col = ifelse(RecessionYears == 1, 'red',ifelse(RecessionCorrection == 1,'chocolate1','black'))),shape = 1,size = 0.8) + 
+  scale_color_identity() +
+  labs(title = "Total Business Sales in US - log transformation",  caption = "Red markers - US recession years \n
+       Orange markers- 2016 market correction") +
+  ylab("log(Sales in trillions of dollars)") + xlab("") + scale_x_date(date_breaks = "3 years",date_labels = "%Y") + 
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        legend.position = "none", 
+        plot.caption  = element_text(colour = "red",face = "bold"), 
+        plot.title = element_text(hjust = 0.5))
+```
+
+
+
+`r figr('Benchmarkmodels', TRUE, type="Figure")` show the predictions of the various benchmark models and table 2 below shows the performance of all the models against each other. ETS model performs a better. 
+
+```{r Benchmarkmodels, fig.cap = "Benchmark models-1"}
+
+#===========================================================================================
+#     STL decomposition
+#     Prediction made with ETS model with no seasonality on the seasonally adjusted data and 
+#    SNAIVE on the seasonal component (WHICH IS DEFAULT)
+#===========================================================================================
+
+
+decomposition_model(STL(log(Sales_in_trillions) ~ trend() + season(window = "periodic")),
+                    ETS(season_adjust ~ season("N"))) -> dcmp_spec
+
+
+
+benchmark <- getModelsTrained(2010,2014,2015,2019)
+
+benchmark$forecasts %>% 
+  filter(.model %in% c('stl','ets','snaive','hw_a','arima')) %>% 
+  autoplot(Sales, level = NULL) +  geom_line(col = "grey") +
+  labs(title = "Benchmark model forecasts", y = "Sales in trillions") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8))
+
+```
+
+
+## Benchmark models - performance
+
+```{r Benchmarkmodels1}
+benchmark$accuracy %>% 
+  filter(.model %in% c('stl','ets','snaive','hw_a','arima')) %>% 
+  knitr::kable(digits = 3, caption = "Benchmark model performance")
+```
+
+## Investigate why ETS performs better?
+
+`r figr('ETSInvestigation', TRUE, type="Figure")` shows the prediction of ETS model. The forecast has overestimated the sales during the 2016 correction and caught up with the rest of the years. While this may seem to be a good model, there is a **problem** with this model. The drift parameter phi in the ETS model is 0.98. If the forecast used 2015 data into its training data, it might underestimate the next five years of sales. 
+
+```{r ETSInvestigation, fig.cap = "ETS model performance"}
+
+benchmark$ModelStack %>% select(ets) %>% report()
+
+benchmark$ModelStack %>% 
+  select(ets) %>% 
+  forecast(h = "5 years") %>% 
+  autoplot(Sales, level = NULL) + geom_line(col = "grey") +
+  labs(title = "ETS model performance",y = "Sales in trillions", subtitle = "Blue line indicate point forecast") + 
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+        panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        plot.subtitle = element_text(colour = "blue", hjust = 0.5)
+        )
+
+  
+```
+
+
+### Re-train ETS model with 2015 data.
+
+As expected the ETS model underestimates the actual sales as shown in `r figr('retrainETS2015', TRUE, type="Figure")`. The ETS model now has a similar performance as other benchmark models.
+
+```{r retrainETS2015, fig.cap = "ETS performance when 2015 data is included."}
+benchmark2 <- getModelsTrained(2010,2015,2016,2019)
+
+benchmark2$ModelStack %>% 
+  select(ets) %>% 
+  forecast(h = "4 years") %>% 
+  autoplot(Sales, level = NULL) + geom_line(col = "grey") +
+  labs(title = "ETS model performance when 2015 data is included",y = "Sales in trillions", x ="",subtitle = "Blue line indicate point forecast") + 
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+        panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "gray92"),
+        axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        plot.subtitle = element_text(colour = "blue", hjust = 0.5)
+        )
+benchmark2$accuracy %>% 
+ filter(.model %in% c('stl','ets','snaive','hw_a','arima')) %>% 
+  knitr::kable(digits = 3, caption = "Performance when 2015 data is included in the training")
+```
+
+
+## Additional models to benchmark
+
+In this section, additional models such as :
+
+1. Fourier models (K = 1,4 & 6)
+2. Linear regression model with Recession/Correction events as predictors and ARIMA error (LMArima).
+3. TSLM with Recession/Correction events as predictors along with trend and season.
+
+**We'll discuss how one could predict future recessions in later sections to be used as regressors.**
+
+Again,the model are very varying in their performance due to their sensitivity to 2015 data. `r figr('AdditionalBenchmark', TRUE, type="Figure")` shows the effect of training data on forecast.
+
+```{r AdditionalBenchmark, fig.cap = "Benchmark model performance - additional models"}
+benchmark3 <- getModelsTrained(2010,2014,2015,2019)
+
+benchmark3$forecasts %>% 
+  filter(.model %in% c('arima',
+                       'K = 1',
+                       'K = 4',
+                       'K = 6',
+                       "LMArima",
+                       'tslm')) %>% 
+  autoplot(Sales, level = NULL) + geom_line(col = "gray") +
+  labs(title = "Model training on data between 2010-14 and validation on 2015-19",
+       y = "Sales in trillions",
+       x = "") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8)) -> bench3
+
+benchmark4 <- getModelsTrained(2010,2015,2016,2019)
+
+benchmark4$forecasts %>% 
+  filter(.model %in% c('arima',
+                       'K = 1',
+                       'K = 4',
+                       'K = 6',
+                       "LMArima",
+                       'tslm')) %>% 
+  autoplot(Sales, level = NULL) + geom_line(col = "gray")+
+  labs(title = "Model training on data between 2010-15 and validation on 2016-19",
+       y = "Sales in trillions",
+       x = "") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8)) -> bench4
+
+gridExtra::grid.arrange(bench3,bench4, nrow = 2)
+
+```
+
+Tables 3 & 4 show the validation performance of the se additional models. One can see the model performances vary considerably due to sensitivity to training data.
+
+```{r}
+
+
+benchmark3$accuracy %>% 
+  knitr::kable(digits = 3, caption = "Additional Benchmark models performance")
+
+benchmark4$accuracy %>% 
+  knitr::kable(digits = 3, caption = "Additional Benchmark models performance - when 2015 data in included in training")
+
+```
+
+
+## Composite model
+
+In this section, a composite modeling approach is attempted. We leverage the common pattern in the data before and after the great recession. As discussed in earlier section and shown in `r figr('BeforeAfterGreatRecession', TRUE, type="Figure")`.
+
+### Composite model concept
+
+The following modeling steps is used to train the composite model:
+
+1. Train an ETS model with dampening trend on the data prior to 2002 to learn the slump during recession in 2001.
+2. Test the ETS model to forecast just the 2016 (market correction year) without re-training the model.
+   +  **But** the level parameter would be a problem if the model is not retrained. One could take the difference in the last training data point and the last "known" data point and add it to the forecast, in an attempt to correct the level parameter's influence. 
+
+3. The ETS model is only used when a recession event is forecasted.
+4. For non-recession years, an ARIMA model is used.
+
+**This is easier explained with an example:**
+
+1. Say,the current day is 2019 December and we need the forecast until 2024 (next 5 years).
+2. Also the next year (2020) is predicted to be recession year - by some method, to be discussed later. 
+3. The ETS model (without retraining) is used to forecast for the next one year. The result of the forecast would be level adjusted by adding the difference in Dec 2019 Sales and Dec 2001 Sales. The Dec 2001 sales was the last training data point for the ETS model. This is done to simply level shift the forecast. With this done, we have forecast for 2020. The data until 2019 **AND** the forecast for 2020 is used as input for an ARIMA model to be trained and to forecast the next 4 years.
+4. IF the recession is predicted to be in the year 2024, the ARIMA model is used to predict until 2023. The ETS model forecast level adjusted by the difference between the last forecast point of ARIMA (2023 Dec) and 2001 Dec. 
+
+Therefore a composite model is a combination of ETS model with dampening trend and ARIMA. The ETS model is applied only when we know a certain year in the future is going to be a recession year. (How can future recession year be forecasted is discussed in later sections)
+
+### Important Assumptions made
+
+Following **important assumptions** are made for executing the composite model.
+
+1. Recessions last only 1 year and spans Jan - Dec. 
+2. Future recession years can be predicted using GDP output gap (discussed in the following sections); but only at the year level and not at the month level.
+3. Two consecutive years cannot be recession years.
+
+
+### Composite model training 
+
+Composite model is trained and tested on data until 2014, with recession to be predicted in 2016. Like how we tested the benchmark models, we also train the model using 2015 data and test it on the remaining validation data. The top panel of `r figr('learnRecessionDrift', TRUE, type="Figure")` shows that while the model over predicts, the model was able to dampen /bend down the predictions for 2016 (The assumption made that no consecutive years can be recession years is probably hurting the model performance). The bottom panel shows the performance when tested on validation data from 2016-2019, which is much better. 
+
+
+
+
+
+```{r learnRecessionDrift, fig.cap="Composite model performace"}
+Sales %>% 
+  filter(year(YearMonth) < 2002)%>% 
+  model(ets = ETS(log(Sales_in_trillions))) -> recessionslope
+  #forecast(h = "1 year") %>% 
+
+
+
+last5knownyears  <-  twoStepForecast(data = Sales,driftmodel = recessionslope,currentyear = 2014,RecessionYears = 2016) 
+
+last4knownyears  <-  twoStepForecast(data = Sales,driftmodel = recessionslope,currentyear = 2015,RecessionYears = 2016) 
+
+
+last4knownyears$forecasts %>% 
+  as_tibble() %>% 
+  filter(year(YearMonth) < 2020) %>% 
+  as_fable(response = Sales_in_trillions,distribution = .distribution) %>% 
+  mutate(.model = "composite") %>% 
+  accuracy(Sales) -> last4knownyearsMetrics
+
+
+last5knownyears$Plot + geom_line(col = "gray") +
+  labs(title = "Composite Model training on data between 2010-14 and validation on 2015-19",
+       y = "Sales in trillions",
+       x = "") +  scale_x_date(date_breaks = "3 years",date_labels = "%Y") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8)) -> Comp2014
+
+
+last4knownyears$forecasts %>% 
+  as_tibble() %>% 
+  filter(year(YearMonth) < 2020) %>% 
+  as_fable(response = Sales_in_trillions,distribution = .distribution) %>% 
+  mutate(.model = "composite") %>% 
+  autoplot(Sales,level = NULL) + geom_line(col = "gray") + scale_x_date(date_breaks = "3 years",date_labels = "%Y") +
+  labs(title = "Composite Model training on data between 2010-15 and validation on 2016-19",
+       y = "Sales in trillions",
+       x = "") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+                                        panel.background = element_rect(fill = "white",color = "black"),
+                                        panel.grid = element_line(colour = "gray92"),
+                                        axis.text = element_text(size = 8),
+                                        axis.title.y = element_text(size = 8)) -> Comp2015
+
+gridExtra::grid.arrange(Comp2014,Comp2015, nrow = 2)
+
+
+```
+
+The below tables show the performance of all models and their sensitivity to 2015 data inclusion in the training set. While it may seem that STL model stayed among the top on both occasions might be a better performing model, the fact that the composite model lets us dampen the forecast at a future time and then ramp up the forecast gives this model a better usability.
+
+
+```{r}
+last5knownyears$metrics %>% 
+  rbind.data.frame(benchmark3$accuracy) %>% 
+  arrange(MAPE) %>% 
+  knitr::kable(digits = 3, caption = "model performance on 2015-2019 validation data",format = "html") %>% 
+  kableExtra::kable_styling(full_width = T) %>% 
+  kableExtra::row_spec(6,color = "red",bold = T)
+```
+
+```{r}
+last4knownyearsMetrics %>% 
+  rbind.data.frame(benchmark4$accuracy) %>% 
+  arrange(MAPE) %>% 
+  knitr::kable(digits = 3, caption = "model performance on 2016-2019 validation data",format = "html") %>% 
+  kableExtra::kable_styling(full_width = T) %>% 
+  kableExtra::row_spec(2,color = "red",bold = T)
+```
+
+
+# Predicting future recession.
+
+One metric that is used to predict recession is the **GDP output gap**. Which measures if the economy is "overheated" i.e. if the economy is performing more than its potential or if its performing under potential. If the value is > 0, then the economy is over performing and a correction/recession is impending. 
+
+The GDP output gap is available from Quandl API under the ticker "ODA/USA_NGAP_NPGD". It is seen in `r figr('PredictRecession', TRUE, type="Figure")` , after three consecutive years of positive GDP output gap, there is a recession. If the pattern follows the, year 2021 is expected be a recession year. With the on set of COVID-19 pandemic, the effect could start in 2020. Hence we would use 2020 to be a recession year for forecasting the next 5 years' Sales.
+
+```{r PredictRecession, fig.cap = "GDP Output from Quandl"}
+Quandl::Quandl("ODA/USA_NGAP_NPGDP",api_key="Qzvhd-siFFvWasZ1YGpJ") -> OutputGDPGap
+
+
+OutputGDPGap %>% 
+  mutate(Date = yearmonth(Date)) %>% 
+  mutate(RecessionYears = factor(ifelse(year(Date) %in% c(2001,2008,2009),"Recession","Non-Recession"),levels = c("Recession","Non-Recession"))) %>% 
+  as_tsibble(index = Date) %>% 
+  ggplot(aes(x=Date, y = Value)) + geom_point(aes(col = RecessionYears))+
+  geom_line() + 
+  labs(title = "GDP Output gap") +
+  ylab("GDP output gap") + xlab("") + scale_x_date(date_breaks = "5 years",date_labels = "%Y") +
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "lightgray"),
+        #legend.position = "none", 
+        plot.caption  = element_text(colour = "#87CEFF"), 
+        plot.title = element_text(hjust = 0.5))
+```
+
+# Five year forecast of US Sales in trillions.
+
+Using the composite model, the next 5 years forecast of US sales is predicted with the assumption that 2020 would be a recession year.
+
+```{r}
+futureyears_2020 <- twoStepForecast(Sales,recessionslope,2019,2020)
+
+futureyears_2020$Plot   + scale_x_date(date_breaks = "5 years",date_labels = "%Y") +
+  labs(title = "Point forecast for US sales in trillions for the next 5 years using Composite of ETS and ARIMA models",
+                    y = "Sales in trillions",
+                    x = "") +  geom_line(col = "grey") +
+  theme(panel.background = element_rect(fill = "white",color = "black"),
+        panel.grid = element_line(colour = "lightgray"),
+        #legend.position = "none", 
+        plot.caption  = element_text(colour = "#87CEFF"), 
+        plot.title = element_text(hjust = 0.5, size = 10))
+
+```
+
+# What is the likelihood of sales surpassing 1.8 trillion?
+
+While the point estimates of the 5 - year forecast did not reach 1.8 trillion, there are uncertainties in the forecast due to noise in the model parameters, noise in the data and the forecast of when the recession would occur in the next 5 years. The below two approaches are used to come up with a variety of forecasts for all possible scenarios when a recession would occur (i.e scenarios where one or none of the following years are recessin years).
+
+1. Bootstrap errors recorded on validation set and add it as shocks to the forecast to generate different forecast paths. A total of 60 paths were generated, 10 for each scenario of when a recession would occur.
+2. Generate time series that are closer to the time series data at hand by bootstrapping the remainder component of the STL decomposition and adding it to the trend and seasonal component to arrive at a new shocked time series. The forecast parameters are re-trained for each of the generated time series and new forecasts are made using the new model at each iteration. Varying recession scenarios in the future years are simulated.
+
+## Approach 1
+
+`r figr('Approach1', TRUE, type="Figure")` shows the 50 simulated forecast paths based on approach 1.
+
+```{r Approach1, fig.cap = "Approach 1 - simulated forecast path"}
+last5knownyears$forecast %>%
+  as_tibble() %>% 
+  filter(year(YearMonth) < 2019) %>% 
+  mutate(actuals =  Sales %>% 
+           filter(year(YearMonth) > 2015,year(YearMonth) < 2020 ) %>% 
+           select(Sales_in_trillions) %>% .$Sales_in_trillions) %>% 
+  mutate(error = actuals - Sales_in_trillions) %>% select(error) %>% 
+  .$error %>% mean() -> meanshock
+
+last5knownyears$forecast %>% 
+  as_tibble() %>% 
+  filter(year(YearMonth) < 2019) %>% 
+  mutate(
+  actuals =  Sales %>% 
+    filter(year(YearMonth) > 2015, year(YearMonth) < 2020) %>% 
+    select(Sales_in_trillions) %>% 
+    .$Sales_in_trillions
+) %>% 
+  mutate(error = actuals - Sales_in_trillions) %>% select(error) %>% .$error %>% sd() -> sdshock
+
+#***************************************************************************************************
+# The function name twoStep forecast is a misnomer. It should probably be renamed CompositeModel().
+#***************************************************************************************************
+twoStepForecast(Sales,recessionslope,2019,2020) -> futureyears_2020
+twoStepForecast(Sales,recessionslope,2019,2021) -> futureyears_2021
+twoStepForecast(Sales,recessionslope,2019,2022) -> futureyears_2022
+twoStepForecast(Sales,recessionslope,2019,2023) -> futureyears_2023
+twoStepForecast(Sales,recessionslope,2019,2024) -> futureyears_2024
+twoStepForecast(Sales,recessionslope,2019,NULL) -> futureyears_NoRecession
+
+futureyears_2020$forecasts %>% 
+  as_tibble() %>% 
+  rbind.data.frame(
+    futureyears_2021$forecast %>% 
+      as_tibble() %>% 
+      rbind.data.frame(
+        futureyears_2022$forecast %>% 
+          as_tibble() %>% 
+          rbind.data.frame(
+            futureyears_2023$forecast %>% 
+              as_tibble() %>% 
+              rbind.data.frame(
+              futureyears_2024$forecast %>% 
+                 as_tibble()
+              ) %>% 
+              rbind.data.frame(
+                futureyears_NoRecession$forecasts %>% 
+                  as_tibble()
+              )
+             
+          )
+      )
+  ) -> df
+
+set.seed(123)
+addshocks <- function(){
+  
+  df %>% mutate(generate = Sales_in_trillions + rnorm(1,meanshock,sdshock)) # based on 
+
+}
+
+
+replicate(100,addshocks(),simplify = F) -> bootstappederrors
+
+bootstappedPaths <- reduce(bootstappederrors,rbind)
+
+
+bootstappedPaths %>% 
+  select(-Sales_in_trillions) %>% 
+  mutate(key = as.factor(rep(1:600,each = 60)) )%>% 
+  select(-.model) %>% 
+  rename(Sales_in_trillions = generate, .model = key) %>% 
+  as_tsibble(index = YearMonth, key = .model) %>% 
+  as_fable(response = Sales_in_trillions,distribution = .distribution)-> generatedfcts
+
+
+generatedfcts %>% 
+  autoplot(Sales, level = NULL ) +  geom_line(col = "grey") + theme(legend.position = "none",
+                                         panel.background = element_rect(fill = "white",color = "black"),
+                                         panel.grid = element_line(colour = "lightgray"),
+                                         plot.caption  = element_text(colour = "#87CEFF"), 
+                                         plot.title = element_text(hjust = 0.5, size = 10)) + labs(title = "50 simulations using approach -1", y = "Sales in trillions", x = "")
+
+# Likelihood of sales surpassing at least once in the 5 years.
+
+generatedfcts %>% 
+  as_tibble() %>% 
+  group_by(.model) %>% 
+  summarise(Over_1.8 = ifelse(sum(Sales_in_trillions > 1.8),1,0)) %>% 
+  ungroup() %>% 
+  summarise(Chance = mean(Over_1.8)) -> Over1.8
+  
+```
+
+** The chance of sales surpassing 1.8 trillion US dollars is  `r paste0(round(Over1.8$Chance,4)* 100,"%")` based on approach 1 ** 
+
+
+## Approach 2 
+
+
+
+```{r Approach2, fig.cap = "Approach 2 - simulated forecast path"}
+#-------------------------------------------------
+#           Simulate time series
+#simulatePaths(Sales$Sales_in_trillions) -> shocks2
+
+
+#    Saved into file, for easier recall, rather than waiting for a long simulation to complete
+
+load("shock.RData")
+
+
+expand_grid(.x=1:6,.y=1:10)  %>% 
+  pmap(function(.x,.y) shocks3 %>% pluck(.x) %>% pluck(.y) %>% pluck(1)) %>% 
+  reduce(rbind.data.frame)->stackedfcts
+
+stackedfcts %<>% 
+  as_tibble() %>% 
+  mutate(.model = as.factor(rep(1:60, each = 60)),
+         ) %>% 
+  as_tsibble(key = .model) %>% 
+  as_fable(response = Sales_in_trillions, distribution = .distribution)
+
+stackedfcts %>% 
+  autoplot(Sales, level = NULL)+  geom_line(col = "grey") +theme(legend.position = "none",
+                                         panel.background = element_rect(fill = "white",color = "black"),
+                                         panel.grid = element_line(colour = "lightgray"),
+                                         plot.caption  = element_text(colour = "#87CEFF"), 
+                                         plot.title = element_text(hjust = 0.5, size = 10)) + labs(title = "50 simulations using approach -2", y = "Sales in trillions", x = "") 
+
+stackedfcts %>% 
+  as_tibble() %>% 
+  group_by(.model) %>% 
+  summarise(Over_1.8 = ifelse(sum(Sales_in_trillions > 1.8),1,0)) %>% 
+  ungroup() %>% 
+  summarise(Chance = mean(Over_1.8)) -> Over1.8_2
+```
+
+
+**The chance of sales surpassing 1.8 trillion US dollars is `r paste0(round(Over1.8_2$Chance,4)*100,"%")` based on approach 2** 
+
+**Based on the above simulation, the likelihood for Sales to surpass 1.8 trillion is between `r paste0(round(Over1.8_2$Chance,4)*100,"%")` to `r paste0(round(Over1.8$Chance,4)* 100,"%")`.**
+
+# Arguments for and against using dis-aggregated data forecast for US sales
+
+In this section the pros and cons of combining the forecasts of dis-aggregated (North, South, East & West region's sales) data to forecast total US sales is discussed.
+
+## Pros: 
+
+When appropriate models are found for each of the regions i.e. if the models are correctly specified, then the summation of the forecasts could yield a better accuracy compared to forecasting the aggregated sales number as whole. The models should capture the key characteristics of the data and the behaviour of series remains identical across time. When the models capture the key characteristics, the aggregate of individual regions' forecast perform better for longer forecast horizon than that of a forecasting model based on the total sales. 
+
+The different regions themselves could serve as predictor variables to the aggregate sales. For example the lagged data of west and south could be good predictors of the aggregated sales data. William W.S. Wei & Bovas Abraham (1981) theoretically prove that if the disaggregated data are othogonal predictors, then the forecast error (RMSE) is at its least. It has been empirically shown (by Bermingham & D’Agostino 2011 ) that, Vector Autoregressive models could be used on disaggregated data (regions data) to get better forecasts of the aggregate data. Other benefit of a well specified model using the regions' as predictors could be, the reduction in prediction interval.
+
+One could also potentially improve the total sales forecast accuracy by using reconciliation / hierarchical forecasting methods. 
+
+
+## Cons:
+
+There is considerable data collection and modeling effort to maintain several forecasting models. As the number of regions or disaggregation levels increase, the gain in forecast accuracy diminishes and there is little return on investment on the increased modeling efforts. Changing model specifications or errors in estimation of parameters, due to change in pattern of the various regions' time series, could lead to poor accuracy. When time series are short, empirical results show that the summation of disaggregate time series' forecasts could yield poorer accuracy compared to forecasting of the total. (Bermingham & D’Agostino 2011)  
+
+
+
+# Conclusion 
+
+The US business Sales has an increasing trend and monthly seasonality with December being the high sales months and Jan & Feb being the low sales months. The trend is affected during recessions (2001,2008-09) and special events like market corrections (2016). The benchmark models (SNAIVE,STL,ETS & ARIMA) that did not have "recession year" as external regressor variable did not have the ability to dampen the forecast during recession year and increase the forecast trend when the recession was over. When last year of the training data had a recession year, the models underestimated the sales for the entire forecast horizon, at times even predicting a negative trend. Additional models such as Fourier models suffered a similar issue. Models that included "recession years" like TSLM, Linear model with ARIMA errors did not learn the slump of the recession well enough.
+
+A composite model that uses a combination of ETS model (with dampening trend and seasonality) and ARIMA is trained to overcome the problems of the benchmark models. The ETS model is turned on to forecast 12 months of future data when a recession is expected for the next year. Then for the remaining 4 years, forecasts from ARIMA model (that is trained on the past data inclusive of the forecast made by ETS model) is used. The ETS model is trained on data from 1992 to 2001. The forecasts for future recession year is made from the same model ETS model without refitting but level adjusted with known sales value at current time. This model was able to dampen forecast during recessions and pick the trend back up once the recession year passes. GDP output gap was used to predict which year in the future is going to be a recession year. This prediction was used as an input into the compositr model.
+
+Bootstrapped errors were used to generate multiple forecast paths for the next 5 years. The forecast paths were used to calculate the probability of sales surpassing 1.8 trillion at least once. Another approach used to estimate the probability was to generate simulations of similar time series as the Sales data with shocks, and refit the composite model and make 5 year forecasts for each of the simulation. The various forecast path were used to determine the likelihood of sales surpassing 1.8 trillion at least once. It was found that likelihood to surpass 1.8 trillion at least once would be between 40 to 44%.
+
+## Future work
+
+Other modeling methods that could be explored are :
+
+1. LSTM 
+2. STL decomposition with external regressor and ARIMA errors.
+3. Attempt to use ML methods.
+

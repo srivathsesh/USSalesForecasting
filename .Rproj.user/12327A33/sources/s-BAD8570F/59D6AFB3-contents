@@ -1,0 +1,53 @@
+Input <- c(5,1,4,NA,NA,3,6)
+x <- c(5,1,6,3,2,4,6)
+x <- c(5,1,6,NA,NA,3,7,2,9,3,6)
+
+isvalidBST <- function(x) {
+  
+  # check if it can be a tree in the first place
+  stopifnot(length(x) %% 2 == 1)
+  
+  # the first layer check
+  if(!(x[2] < x[1] & x[3] > x[1])){
+    message("failed at the first level")
+    return(FALSE)
+  }
+  
+  #----------------------
+  # assign position id
+  #------------------------
+  
+  # find the positions of NA
+  NA_position <- which(is.na(x))
+  
+  pos_id <- 1:length(x)
+  
+  if(length(NA_position) > 0) {
+    pos_id <-  ifelse(pos_id >= NA_position[1]*2, pos_id + 4, pos_id)
+    re_x <- rep(NA, max(pos_id))
+    re_x[pos_id] <- x
+    x <- re_x
+  }
+  
+  
+  for(i in pos_id[pos_id > 3]){
+    #browser()
+    if(i %% 2 == 0){
+      if(!is.na(x[i]) & !x[i] < x[i/2]){
+        message("failed on the left subtree")
+        return(FALSE)
+      }
+    } else {
+      if(!is.na(x[i]) & !x[i] > x[(i-1)/2]){
+        message("failed on the right subtree")
+        return(FALSE)
+      }
+    }
+  }
+  
+  return(TRUE)
+  
+}
+
+
+

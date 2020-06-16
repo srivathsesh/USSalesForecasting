@@ -1,0 +1,55 @@
+#Given nums = [2, 7, 11, 15], target = 9
+
+pairsthatSumTo <- function(input, target){
+  difference <- target - input
+  which(input %in% intersect(difference,input))
+}
+
+# Given a string, find the length of the longest substring without repeating characters.
+# 
+# Example 1:
+#   
+#   Input: "abcabcbb"
+# Output: 3 
+# Explanation: The answer is "abc", with the length of 3. 
+# Example 2:
+#   
+#   Input: "bbbbb"
+# Output: 1
+# Explanation: The answer is "b", with the length of 1.
+# Example 3:
+#   
+#   Input: "pwwkew"
+# Output: 3
+# Explanation: The answer is "wke", with the length of 3. 
+# Note that the answer must be a substring, "pwke" is a subsequence and not a substring.
+
+# find the unique set of characters
+
+# find the positions of each of the characters
+
+# Are the positions of each ofthe unique characters next to each other? How many of the unique characters are in sequence?
+
+      ## get the positions in matrix, fill 0s to make the matrix uniform in columns
+      ## Get the abs difference in positions to know if they are in sequence
+
+     ## 
+
+maxsubstrlength <- function(str){
+  strarray <- strsplit(str,"")[[1]]
+  uniquechars <- unique(strarray)
+  positions <- sapply(uniquechars,function(x) which(strarray == x))
+  veclength <- max(sapply(positions,length))
+  posmatrix <- matrix(NA,length(uniquechars), veclength)
+  for(i in 1:length(uniquechars)){
+    posmatrix[i,] <- c(positions[[i]],rep(0,veclength - length(positions[[i]])))
+    
+  }
+  
+  posmatrix <- rbind(posmatrix,posmatrix[1,])
+  diffmat <- abs(diff(posmatrix))
+  diffmat <- ifelse(diffmat > 1,0,diffmat)
+  
+  return(max(colSums(diffmat) + 1))
+  
+}

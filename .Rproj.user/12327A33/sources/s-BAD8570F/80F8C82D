@@ -1,0 +1,23 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1592150558537.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "387804727",
+    "id" : "80F8C82D",
+    "lastKnownWriteTime" : 1585099523,
+    "last_content_update" : 1585099523,
+    "path" : "~/Documents/USSalesForecast/twoStepForecast.R",
+    "project_path" : "twoStepForecast.R",
+    "properties" : {
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 4,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

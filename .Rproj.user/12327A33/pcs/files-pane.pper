@@ -1,0 +1,13 @@
+{
+    "path" : "~/Documents/USSalesForecast",
+    "sortOrder" : [
+        {
+            "ascending" : false,
+            "columnIndex" : 4
+        },
+        {
+            "ascending" : true,
+            "columnIndex" : 2
+        }
+    ]
+}
